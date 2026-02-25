@@ -85,7 +85,8 @@ def add_cors_headers(response):
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Vary"] = "Origin"
-    response.headers["Cross-Origin-Opener-Policy"] = "unsafe-none"
+    # Remove COOP/COEP to allow Google OAuth popup
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
     response.headers["Cross-Origin-Embedder-Policy"] = "unsafe-none"
     return response
 
@@ -646,6 +647,9 @@ def google_auth():
     if not rate_limit_check(f"gauth:{ip}", 10, 300):
         return jsonify({"error": "Too many attempts"}), 429
     
+    # Set CORS headers explicitly for Google OAuth
+    origin = request.headers.get("Origin", "")
+    
     data = request.json or {}
     credential = data.get("credential")
     if not credential:
@@ -655,6 +659,7 @@ def google_auth():
         info = None
         last_error = None
         
+        # Try to validate token with Google
         for attempt in range(3):
             try:
                 r = requests.get(
@@ -668,14 +673,21 @@ def google_auth():
                 if r.status_code == 200:
                     info = r.json()
                     break
-                last_error = f"Status {r.status_code}"
+                last_error = f"Google API returned status {r.status_code}"
+                log.error(f"[GOOGLE] Attempt {attempt+1}: {last_error}")
+            except requests.exceptions.Timeout:
+                last_error = "Request timeout"
+                log.error(f"[GOOGLE] Attempt {attempt+1}: Timeout")
             except Exception as e:
                 last_error = str(e)
+                log.error(f"[GOOGLE] Attempt {attempt+1}: {e}")
+            
+            if attempt < 2:
                 time.sleep(0.5)
         
         if not info:
-            log.error(f"[GOOGLE] Token validation failed: {last_error}")
-            return jsonify({"error": "Could not verify Google token"}), 400
+            log.error(f"[GOOGLE] Token validation failed after 3 attempts: {last_error}")
+            return jsonify({"error": "Could not verify with Google. Please try again or use email login."}), 400
         
         aud = info.get("aud", "")
         if GOOGLE_CLIENT_ID and aud and aud != GOOGLE_CLIENT_ID:
